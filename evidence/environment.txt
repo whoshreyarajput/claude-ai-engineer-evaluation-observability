@@ -1,0 +1,4 @@
+Platform: Udacity Linux Workspace
+Python: Python 3.13.0
+Git: git version 2.39.5
+Date: Wed Nov 11 11:31:52 UTC 2026
