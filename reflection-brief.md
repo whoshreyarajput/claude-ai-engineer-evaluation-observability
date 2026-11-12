@@ -1,76 +1,58 @@
-# Reflection Brief — Evaluation and Observability
+# Reflection Brief — Evaluation and Observability Capstone
 
-## 1. Insurance Policy Extraction Pipeline
+**Name:** Ayush
+**Date:** 2026-11-12
 
-The insurance pipeline demonstrated the importance of combining extraction confidence, validation, and human review.
+## 0. Environment
+| Field | Value |
+|---|---|
+| OS & version | Udacity Linux Workspace (`evidence/environment.txt`) |
+| Python version | Python 3.13.0 |
+| Date run | Wed Nov 11 2026 (perturbation runs 2026-11-12) |
+| Ran any system live? (which) | System 1 (policy pipeline via claude.vocareum.com, `pipeline.txt`); Systems 2 and 3 in replay/offline |
 
-The live run processed **nine decisions** and identified missing source evidence and a premium consistency issue.
+## 1. Validated, routed pipeline
+| Evidence | Value |
+|---|---|
+| Passing test count | 45 passed, 3 skipped (`01-policy/tests.txt`) |
+| Routing output file | `evidence/01-policy/routing_decisions.json` |
+| auto_approve / human_review / spot_check counts | 0 / 8 / 1 (1 escalation) |
 
-An important observation was that high extraction confidence does not automatically mean a decision should be approved. Reviewer disagreement can independently justify human review.
+**1a. Retry boundary.** With the premium removed from POL-2025-003, `perturbation-live.txt` shows one `POST` (1 API call), then `validation_failed`, and its summary JSON records `"escalations": 1`, `premium_amount_absent`, `missing_source`. The data is not in the document, so retrying would pay for identical failures and could tempt the model to invent a value; escalating immediately is cheaper and surfaces the real problem.
 
-The calibration output showed an overall Brier score of **0.291**. However, the sample was small, so this should be treated as illustrative rather than representative of production performance.
+**1b. Reading the router.** POL-2025-001 (`routing_decisions.json`): confidences 0.90-0.99 and `fields_below_threshold: []`, `integration_failures: []`, but `reason: reviewer_disagreement=['coverage_limit', 'deductible']`. The reviewer signal sent it to a human. Trusting confidence alone would have auto-approved a policy where the two independent reviewers disagreed on coverage limit and deductible.
 
-**Verification:**
-- Tests: 45 passed, 3 skipped.
-- MyPy: No issues in 11 source files.
-- Ruff: All checks passed.
-- Live pipeline: Routing decisions generated successfully.
+**1c. Where the aggregate lies.** `calibration.txt`: `umbrella exclusions n=2 conf=0.93 acc=0.00 brier=0.865`, against `OVERALL brier=0.291`. A single overall number averages the umbrella exclusions failure with the accurate auto premium cell (conf 0.95, acc 1.00); slicing by policy_type × field shows exactly where confidence is unearned.
 
----
+## 2. Schema-enforced two-pass extraction
+| Evidence | Value |
+|---|---|
+| Passing test count | 25 passed (`02-mortgage/tests.txt`) |
+| Document run | `fixtures/documents/appraisal_informal_sqft.txt` (`02-mortgage/appraisal.txt`) |
+| Classified type | `classify: model=claude-haiku-4-5-20251001 in=2169 out=108 type=appraisal` |
 
-## 2. Mortgage Document Extraction System
+**2a. Two guarantees.** `income-mismatch.txt`: `"consistent": false`, `calculated: 9642.17`, `stated: 10892.17`, `delta: -1250.0`. Tool use guarantees the output is valid JSON matching the schema; the validator checks the arithmetic meaning of the values. Tool use cannot catch a well-formed but wrong number (e.g. a misread stated total). The validator cannot catch an error that keeps the sums consistent, or a field that is absent. Perturbation: raising tolerance to 2000.00 made the same -1250.00 gap pass (`tolerance-perturbation.txt`, `consistent: true`).
 
-The mortgage system demonstrated the importance of mathematical consistency checks and preserving missing values.
+**2b. Refusing to fabricate.** `missing-bonus.txt` lines 15-16: `"bonus_monthly": null`, `"bonus_ytd": null`. `models.py` declares these as `float | None = None`, so null is valid, and rule 1 of `_CATEGORICAL_CRITERIA` in `prompts.py` says "Return null for any field not explicitly stated in the document. Do not infer, default, or fabricate." `Income.calculated_monthly_total` returns `None` rather than `0.0`, so absence is not treated as zero.
 
-The income mismatch scenario calculated monthly income as **$9,642.17**, while the document stated **$10,892.17**. The validator detected a **$1,250 discrepancy** and marked the result inconsistent.
+**2c. Normalization.** Source line 37 of `appraisal_informal_sqft.txt`: "approximately 2,400 sq ft" → `"gross_living_area_sqft": 2400` (`appraisal.txt`). Normalizing at extraction time (rules in `NORMALIZATION_RULES`) means every downstream consumer and the validator receive typed numbers, not strings each must parse differently.
 
-The missing-bonus scenario preserved missing values as `null` instead of interpreting them as zero. This prevents incomplete documentation from being mistaken for a confirmed financial value.
+## 3. Multi-source synthesis
+| Evidence | Value |
+|---|---|
+| Passing test count | 34 passed (`03-supply-chain/tests.txt`) |
+| Briefing file | `evidence/03-supply-chain/meridian-offline.txt` |
+| Section the conflict landed in | Contested (`on_time_delivery_rate`, ESCALATE) |
 
-**Verification:**
-- Tests: 25 passed.
-- MyPy: No issues in 11 source files.
-- Ruff: All checks passed.
-- Replay scenarios: Completed successfully.
+**3a. Annotate, don't arbitrate.** `meridian-offline.txt`: "95.0 percent — supplier_audit (as of 2026-04-10)" vs "78.0 percent — logistics (as of 2026-04-05)". A reader who sees both knows the supplier's self-audit is far more optimistic than logistics data and can investigate; an average (~86.5%) would match neither source and hide the dispute.
 
----
+**3b. Source goes dark.** `meridian-timeout.txt` line 5: "Sources unavailable: logistics unavailable (timeout)"; `late_shipment_count` is under Incomplete ("missing source: timeout reading logistics"). Unreachable is recorded as missing/incomplete, not as zero or "nothing to report"; the other sources keep processing, so the run finishes with a partial briefing. Baseline had `late_shipment_count` = 11.0 shipments.
 
-## 3. Supply Chain Risk Investigation
+**3c. Dates as a guardrail.** Industry news is dated: the recall "(industry_news, 2026-02-19)" and the port strike "(industry_news, 2026-03-17)", and the contested metric values carry "as of" dates (2026-04-10 vs 2026-04-05). Requiring the date lets the reader see whether two claims are simultaneous or simply measured at different times, so a time difference is not read as a contradiction.
 
-The supply-chain coordinator demonstrated resilience when one source became unavailable.
+## 4. Synthesis
+**4a. One principle.** Across all three systems, reliable automation requires more than valid output: it must validate meaning, preserve uncertainty and source provenance, and escalate when evidence is insufficient. The clearest moment: System 2, `income-mismatch.txt`: valid JSON from the model, yet the validator reported `delta: -1250.0`. A design trusting well-formed output would have shipped the wrong income total.
 
-During the normal investigation, the system identified:
-- Corroborated findings.
-- Conflicting delivery-rate evidence.
-- Ambiguous supplier identity.
-- A metric with no available source.
+**4b. Confidence ≠ correctness.** System 1: `calibration.txt` shows `umbrella exclusions conf=0.93 acc=0.00`, and POL-2025-001 had confidences 0.90-0.99 yet reviewers disagreed. High stated confidence coincided with wrong or disputed answers.
 
-During the simulated logistics timeout, the coordinator continued processing other sources. It preserved partial results and marked late shipment count as incomplete.
-
-This showed why source availability, evidence provenance, and uncertainty should be represented separately. A failed source should not be interpreted as an empty result or cause the entire investigation to fail.
-
-**Verification:**
-- Tests: 34 passed.
-- MyPy: No issues in 8 source files.
-- Ruff: All checks passed.
-- Normal offline and simulated-timeout investigations: Completed successfully.
-
----
-
-## 4. Overall Learnings
-
-1. Confidence alone is insufficient for automated decisions; validation and human review are also important.
-2. Missing values should remain distinguishable from actual zero values.
-3. Conflicting evidence should be preserved and surfaced instead of silently resolved.
-4. Partial results are valuable when a source becomes unavailable.
-5. Provenance helps identify where a claim came from.
-6. Automated tests, type checking, and linting provide complementary forms of verification.
-
----
-
-## 5. Limitations
-
-- The insurance calibration sample was small and should not be treated as production-level statistical validation.
-- The mortgage mismatch and missing-bonus scenarios used existing replay fixtures rather than manually modified documents.
-- The supply-chain timeout was explicitly simulated rather than caused by a real external outage.
-
-These limitations are important when interpreting the evidence and assessing how the systems might behave in production.
+**4c. Apply it.** Workflow: extracting line items and totals from supplier invoice PDFs. I would use validated retry with escalation first: validate that line items sum to the stated total, retry only when the failure is fixable, and escalate missing-source cases immediately (as in 1a). I would instrument the validation-failure rate per field, retry counts, escalation count by reason, and calibration (confidence vs accuracy) per vendor × field, alerting when a slice drifts.
